@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "author": "Team EdgeVital",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-arduino-mega",
+      "id": "mega",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-max30102",
+      "id": "hr_sensor",
+      "top": -120,
+      "left": 100,
+      "attrs": { "label": "MAX30102 HR/SpO2" }
+    },
+    {
+      "type": "wokwi-mpu6050",
+      "id": "imu",
+      "top": -120,
+      "left": 250,
+      "attrs": { "label": "MPU6050 IMU" }
+    },
+    {
+      "type": "wokwi-buzzer",
+      "id": "buzzer",
+      "top": 200,
+      "left": 50,
+      "attrs": { "label": "Alert Buzzer" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_normal",
+      "top": 200,
+      "left": 150,
+      "attrs": { "color": "green", "label": "NORMAL" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_strain",
+      "top": 200,
+      "left": 200,
+      "attrs": { "color": "yellow", "label": "STRAIN" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_critical",
+      "top": 200,
+      "left": 250,
+      "attrs": { "color": "red", "label": "CRITICAL" }
+    },
+    {
+      "type": "wokwi-potentiometer",
+      "id": "gsr_sim",
+      "top": -120,
+      "left": 400,
+      "attrs": { "label": "GSR Simulator" }
+    },
+    {
+      "type": "wokwi-potentiometer",
+      "id": "resp_sim",
+      "top": -40,
+      "left": 400,
+      "attrs": { "label": "Respiration Simulator" }
+    }
+  ],
+  "connections": [
+    ["mega:20", "hr_sensor:SDA", "blue", ["v-20", "h40"]],
+    ["mega:21", "hr_sensor:SCL", "green", ["v-30", "h40"]],
+    ["mega:5V", "hr_sensor:VCC", "red", []],
+    ["mega:GND.1", "hr_sensor:GND", "black", []],
+    ["mega:20", "imu:SDA", "blue", ["v-20", "h40"]],
+    ["mega:21", "imu:SCL", "green", ["v-30", "h40"]],
+    ["mega:5V", "imu:VCC", "red", []],
+    ["mega:GND.2", "imu:GND", "black", []],
+    ["mega:9", "buzzer:1", "purple", []],
+    ["mega:GND.3", "buzzer:2", "black", []],
+    ["mega:2", "led_normal:A", "green", []],
+    ["mega:GND.4", "led_normal:C", "black", []],
+    ["mega:3", "led_strain:A", "orange", []],
+    ["mega:GND.5", "led_strain:C", "black", []],
+    ["mega:4", "led_critical:A", "red", []],
+    ["mega:GND.6", "led_critical:C", "black", []],
+    ["mega:A0", "gsr_sim:SIG", "yellow", []],
+    ["mega:5V", "gsr_sim:VCC", "red", []],
+    ["mega:GND.7", "gsr_sim:GND", "black", []],
+    ["mega:A1", "resp_sim:SIG", "cyan", []],
+    ["mega:5V", "resp_sim:VCC", "red", []],
+    ["mega:GND.8", "resp_sim:GND", "black", []]
+  ]
+}

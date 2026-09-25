@@ -1,0 +1,7 @@
+# EdgeVital Backend Dependencies
+# Raspberry Pi 4 / Python 3.9+
+
+flask>=3.0.0
+flask-cors>=4.0.0
+pyserial>=3.5        # For UART communication with nRF52840
+smbus2>=0.4.0        # For I2C communication (RPi)
