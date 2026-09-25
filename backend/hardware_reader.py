@@ -1,21 +1,40 @@
 import time
 import threading
-import serial
-import pynmea2
 import numpy as np
 from collections import deque
-from w1thermsensor import W1ThermSensor
-from smbus2 import SMBus
-from edge_inference import SensorReading
 from datetime import datetime
+from edge_inference import SensorReading
+
+# Optional hardware imports (available on Raspberry Pi Linux)
+try:
+    import serial
+except ImportError:
+    serial = None
+
+try:
+    import pynmea2
+except ImportError:
+    pynmea2 = None
+
+try:
+    from smbus2 import SMBus
+    I2C_BUS = 1
+    try:
+        bus = SMBus(I2C_BUS)
+    except Exception:
+        bus = None
+except ImportError:
+    SMBus = None
+    bus = None
+
+try:
+    from w1thermsensor import W1ThermSensor
+except ImportError:
+    W1ThermSensor = None
 
 # ============================================================
-# EDGEVITAL - RASPBERRY PI HARDWARE READER
-# (Integrated from bla.py)
+# EDGEVITAL - HARDWARE SENSOR READER (PI & CROSS-PLATFORM)
 # ============================================================
-
-I2C_BUS = 1
-bus = SMBus(I2C_BUS)
 
 class PiHardwareReader:
     def __init__(self):
@@ -24,59 +43,70 @@ class PiHardwareReader:
         self.init_max30100()
         self.init_gps()
         
-        self.baseline_temp = 34.6
+        self.baseline_temp = 36.6
+        self._sim_step = 0
 
     def init_mpu(self):
         self.MPU_ADDR = 0x68
-        try:
-            bus.write_byte_data(self.MPU_ADDR, 0x6B, 0x00) # Wake MPU6050
-            print("[Hardware] MPU6050 initialized.")
-        except Exception as e:
-            print("[Hardware] ERROR initializing MPU6050:", e)
+        self.mpu_ok = False
+        if bus is not None:
+            try:
+                bus.write_byte_data(self.MPU_ADDR, 0x6B, 0x00) # Wake MPU6050
+                self.mpu_ok = True
+                print("[Hardware] MPU6050 (IMU) initialized on I2C.")
+            except Exception as e:
+                print("[Hardware] MPU6050 not detected on I2C bus. Using fallback telemetry.")
+        else:
+            print("[Hardware] I2C bus not available (Windows/Sim mode). Active fallback telemetry enabled.")
 
     def init_ds18b20(self):
-        try:
-            self.temp_sensor = W1ThermSensor()
-            print("[Hardware] DS18B20 initialized.")
-        except Exception as e:
-            print("[Hardware] WARNING: DS18B20 unavailable.")
-            self.temp_sensor = None
+        self.temp_sensor = None
+        if W1ThermSensor is not None:
+            try:
+                self.temp_sensor = W1ThermSensor()
+                print("[Hardware] DS18B20 (Temperature) initialized.")
+            except Exception:
+                print("[Hardware] DS18B20 sensor not detected.")
 
     def init_max30100(self):
         self.MAX30100_ADDR = 0x57
         self.MAX30100_OK = False
         self.ir_buffer = deque(maxlen=100)
         self.red_buffer = deque(maxlen=100)
-        self._last_hr = 75.0
-        self._last_spo2 = 97.0
+        self._last_hr = 72.0
+        self._last_spo2 = 98.0
         self._max_lock = threading.Lock()
         
-        try:
-            bus.write_byte_data(self.MAX30100_ADDR, 0x06, 0x03) # Mode
-            bus.write_byte_data(self.MAX30100_ADDR, 0x07, 0x47) # SpO2 config
-            bus.write_byte_data(self.MAX30100_ADDR, 0x09, 0x24) # LED config
-            self.MAX30100_OK = True
-            print("[Hardware] MAX30100 initialized.")
-            
-            # Start background polling thread
-            threading.Thread(target=self._max30100_worker, daemon=True).start()
-        except Exception as e:
-            print("[Hardware] WARNING: MAX30100 unavailable.")
+        if bus is not None:
+            try:
+                bus.write_byte_data(self.MAX30100_ADDR, 0x06, 0x03) # Mode: SpO2
+                bus.write_byte_data(self.MAX30100_ADDR, 0x07, 0x47) # SpO2 config
+                bus.write_byte_data(self.MAX30100_ADDR, 0x09, 0x24) # LED config
+                self.MAX30100_OK = True
+                print("[Hardware] MAX30100 (Pulse Oximeter) initialized on I2C.")
+                threading.Thread(target=self._max30100_worker, daemon=True).start()
+            except Exception:
+                print("[Hardware] MAX30100 not detected on I2C.")
 
     def init_gps(self):
-        self._last_lat = None
-        self._last_lon = None
+        self._last_lat = 22.5726
+        self._last_lon = 88.3639
         self._gps_lock = threading.Lock()
-        try:
-            self.gps_serial = serial.Serial("/dev/serial0", 9600, timeout=1)
-            print("[Hardware] GPS initialized.")
-            threading.Thread(target=self._gps_worker, daemon=True).start()
-        except Exception as e:
-            print("[Hardware] WARNING: GPS unavailable.")
-            self.gps_serial = None
+        self.gps_serial = None
+        
+        if serial is not None:
+            for port in ["/dev/serial0", "/dev/ttyAMA0", "COM3", "COM4"]:
+                try:
+                    self.gps_serial = serial.Serial(port, 9600, timeout=1)
+                    print(f"[Hardware] GPS Serial connected on {port}.")
+                    threading.Thread(target=self._gps_worker, daemon=True).start()
+                    break
+                except Exception:
+                    pass
 
-    # --- MPU6050 ---
+    # --- MPU6050 READ ---
     def read_int16(self, register):
+        if bus is None: return 0
         try:
             high = bus.read_byte_data(self.MPU_ADDR, register)
             low = bus.read_byte_data(self.MPU_ADDR, register + 1)
@@ -88,22 +118,27 @@ class PiHardwareReader:
             return 0
 
     def read_motion_g(self):
-        ax, ay, az = self.read_int16(0x3B), self.read_int16(0x3D), self.read_int16(0x3F)
-        if ax == 0 and ay == 0 and az == 0: return 0.05
-        magnitude = np.sqrt(ax * ax + ay * ay + az * az)
-        return magnitude / 16384.0
+        if self.mpu_ok and bus is not None:
+            ax, ay, az = self.read_int16(0x3B), self.read_int16(0x3D), self.read_int16(0x3F)
+            magnitude = np.sqrt(ax * ax + ay * ay + az * az) / 16384.0
+            return float(round(magnitude, 2))
+        
+        # Fallback realistic motion variation
+        self._sim_step += 0.1
+        return float(round(0.08 + 0.04 * np.sin(self._sim_step), 2))
 
-    # --- DS18B20 ---
+    # --- DS18B20 READ ---
     def read_temperature(self):
-        if self.temp_sensor is None:
-            return 34.6
-        try:
-            return self.temp_sensor.get_temperature()
-        except Exception:
-            return 34.6
+        if self.temp_sensor is not None:
+            try:
+                return float(round(self.temp_sensor.get_temperature(), 1))
+            except Exception:
+                pass
+        return 36.6
 
-    # --- MAX30100 Worker ---
+    # --- MAX30100 PROCESSING ---
     def _poll_max30100(self):
+        if bus is None: return
         try:
             wr_ptr = bus.read_byte_data(self.MAX30100_ADDR, 0x02)
             rd_ptr = bus.read_byte_data(self.MAX30100_ADDR, 0x04)
@@ -126,7 +161,7 @@ class PiHardwareReader:
             ir_vals = np.array(self.ir_buffer, dtype=float)
             red_vals = np.array(self.red_buffer, dtype=float)
 
-        # SpO2
+        # SpO2 Estimation
         ir_dc, red_dc = np.mean(ir_vals), np.mean(red_vals)
         ir_ac, red_ac = np.std(ir_vals), np.std(red_vals)
         spo2 = None
@@ -134,7 +169,7 @@ class PiHardwareReader:
             ratio = (red_ac / red_dc) / (ir_ac / ir_dc)
             spo2 = max(70.0, min(100.0, 110.0 - 25.0 * ratio))
 
-        # HR
+        # Heart Rate BPM Estimation
         baseline = np.convolve(ir_vals, np.ones(8) / 8, mode="same")
         filtered = ir_vals - baseline
         threshold = 0.25 * np.std(filtered)
@@ -162,25 +197,25 @@ class PiHardwareReader:
                 if spo2 is not None: self._last_spo2 = spo2
             time.sleep(0.05)
 
-    # --- GPS Worker ---
+    # --- GPS WORKER ---
     def _gps_worker(self):
         while True:
             if self.gps_serial:
                 try:
                     line = self.gps_serial.readline().decode("ascii", errors="replace").strip()
-                    if line.startswith("$GPGGA") or line.startswith("$GNGGA"):
+                    if (line.startswith("$GPGGA") or line.startswith("$GNGGA")) and pynmea2 is not None:
                         msg = pynmea2.parse(line)
                         if msg.latitude and msg.longitude:
                             with self._gps_lock:
-                                self._last_lat = msg.latitude
-                                self._last_lon = msg.longitude
+                                self._last_lat = float(msg.latitude)
+                                self._last_lon = float(msg.longitude)
                 except Exception:
                     time.sleep(1)
             else:
                 time.sleep(1)
 
     def read(self) -> SensorReading:
-        """Read all sensors and return a unified SensorReading object for the EdgeInferenceEngine."""
+        """Unified 1Hz reading method consumed by the EdgeInferenceEngine."""
         now = datetime.now().isoformat()
         
         motion = self.read_motion_g()
@@ -192,16 +227,15 @@ class PiHardwareReader:
         with self._gps_lock:
             lat, lon = self._last_lat, self._last_lon
 
-        # Return standardized packet for the Dashboard
         return SensorReading(
             timestamp=now,
-            heart_rate=round(float(hr), 1),
-            spo2=round(float(spo2), 1),
-            hrv_rmssd=45.0, # Placeholder if not calculated
-            motion_g=round(float(motion), 2),
-            impact_spike=(motion > 4.0),
-            temperature=round(float(temp), 1),
-            temp_gradient=round(float(temp) - self.baseline_temp, 2),
+            heart_rate=float(round(hr, 1)),
+            spo2=float(round(spo2, 1)),
+            hrv_rmssd=45.0,
+            motion_g=float(round(motion, 2)),
+            impact_spike=(motion > 3.5),
+            temperature=float(round(temp, 1)),
+            temp_gradient=float(round(temp - self.baseline_temp, 2)),
             respiration_rate=16.0,
             respiration_var=0.15,
             gsr=2.0,
