@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { subscribeToVitals, subscribeToAlerts, updateFirebaseUrl, getCurrentFirebaseUrl, clearAlert, resolveMedicDispatch } from '../firebase'
 
 // States: 0=offline, 1=init, 2=monitoring, 3=jammed, 4=incoming, 5=dispatch, 6=modal, 7=enroute
 const OFFLINE = 0, INIT = 1, MONITORING = 2, JAMMED = 3, INCOMING = 4, DISPATCH = 5, MODAL = 6, ENROUTE = 7
@@ -32,9 +33,100 @@ export default function CommandCenter() {
   const [commsAvail, setCommsAvail] = useState(true)
   const [simDisabled, setSimDisabled] = useState(false)
   const [enrouteAnim, setEnrouteAnim] = useState(false)
+  const [dispatchProgress, setDispatchProgress] = useState(0)
   const [resetKey, setResetKey]   = useState(0)
+  const [liveVitals, setLiveVitals] = useState(null)
+  const [firebaseActive, setFirebaseActive] = useState(false)
+  const [showFbModal, setShowFbModal] = useState(false)
+  const [fbInputUrl, setFbInputUrl] = useState(getCurrentFirebaseUrl())
+
+  // Army Personnel Profile Management
+  const [soldierProfile, setSoldierProfile] = useState(() => {
+    const saved = localStorage.getItem('edgevital_soldier_profile')
+    return saved ? JSON.parse(saved) : {
+      code: 'SQD-ALPHA-01',
+      id: 'soldier_01',
+      unit: '1st Parachute Regiment',
+      bloodGroup: 'O+',
+      contact: '+91 98765 43210'
+    }
+  })
+  const [showPersonnelModal, setShowPersonnelModal] = useState(false)
+  const [personnelInput, setPersonnelInput] = useState(soldierProfile)
+
+  const saveFbUrl = () => {
+    updateFirebaseUrl(fbInputUrl)
+    setShowFbModal(false)
+    addLog('SYSTEM', `Firebase URL updated: ${fbInputUrl}`)
+    setResetKey(k => k + 1)
+  }
+
+  const savePersonnelProfile = () => {
+    setSoldierProfile(personnelInput)
+    localStorage.setItem('edgevital_soldier_profile', JSON.stringify(personnelInput))
+    setShowPersonnelModal(false)
+    addLog('SYSTEM', `Army Personnel updated: ${personnelInput.code}`)
+    // Sync soldier profile to Firebase
+    try {
+      const dbUrl = getCurrentFirebaseUrl().replace(/\/$/, '')
+      fetch(`${dbUrl}/soldiers/${personnelInput.id}.json`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(personnelInput)
+      }).catch(() => {})
+    } catch (e) {}
+  }
 
   const { entries, addLog, logRef } = useEventLog()
+
+  // Subscribe to live telemetry and alerts from Raspberry Pi via Firebase
+  useEffect(() => {
+    const unsubVitals = subscribeToVitals('soldier_01', (data) => {
+      if (data) {
+        setLiveVitals(data)
+        setFirebaseActive(true)
+        // Latch critical state: do NOT auto-dismiss DISPATCH/MODAL/ENROUTE screen even if status returns to NORMAL
+        setPhase(prev => (prev === OFFLINE ? MONITORING : prev))
+      }
+    })
+
+    const unsubAlerts = subscribeToAlerts('soldier_01', (alertData) => {
+      if (alertData && alertData.severity === 'CRITICAL') {
+        setLiveVitals(prev => ({ ...prev, ...alertData }))
+        addLog('FIREBASE', 'CRITICAL alert received from Raspberry Pi via Firebase')
+        setPhase(prev => (prev === ENROUTE ? ENROUTE : INCOMING))
+        setTimeout(() => {
+          setPhase(prev => (prev === ENROUTE ? ENROUTE : DISPATCH))
+        }, 800)
+      } else if (alertData && (alertData.severity === 'NORMAL' || alertData.status === 'NORMAL')) {
+        setLiveVitals(prev => (prev ? { ...prev, status: 'NORMAL', reasons: [] } : prev))
+        // Latch critical screen: DO NOT auto-set MONITORING away from active DISPATCH / MODAL / ENROUTE until medic help is sent or user resets
+      }
+    })
+
+    return () => {
+      unsubVitals()
+      unsubAlerts()
+    }
+  }, [addLog])
+
+  // Browser Geolocation: get exact device coordinates with fallback to BMSIT Bangalore
+  useEffect(() => {
+    if (typeof window !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = Number(pos.coords.latitude.toFixed(4))
+          const lon = Number(pos.coords.longitude.toFixed(4))
+          setLiveVitals(prev => (prev ? { ...prev, latitude: prev.latitude ?? lat, longitude: prev.longitude ?? lon } : { latitude: lat, longitude: lon }))
+          addLog('GPS', `HQ Geolocation active: ${lat}° N, ${lon}° E`)
+        },
+        () => {
+          setLiveVitals(prev => (prev ? { ...prev, latitude: prev.latitude ?? 13.1337, longitude: prev.longitude ?? 77.5682 } : { latitude: 13.1337, longitude: 77.5682 }))
+        },
+        { enableHighAccuracy: true, timeout: 8000 }
+      )
+    }
+  }, [addLog])
 
   const checkLabels = ['COMMAND LINK', 'nRF52840 SENSOR HUB', 'UART/I2C BRIDGE', 'TELEMETRY ENGINE', 'LOCATION SERVICES', 'EDGE INFERENCE']
 
@@ -85,9 +177,16 @@ export default function CommandCenter() {
     }
   }
 
+  const getCoordsFormatted = useCallback(() => {
+    return liveVitals?.latitude && liveVitals?.longitude
+      ? `${Number(liveVitals.latitude).toFixed(4)}° N, ${Number(liveVitals.longitude).toFixed(4)}° E`
+      : '13.1337° N, 77.5682° E'
+  }, [liveVitals?.latitude, liveVitals?.longitude])
+
   function goIncoming() {
     setPhase(INCOMING)
     addLog('ALERT', 'Incoming burst transmission detected')
+    const coords = getCoordsFormatted()
     setTimeout(() => {
       setPhase(DISPATCH)
       addLog('TELEMETRY', 'HR: 150 BPM (elevated)')
@@ -96,20 +195,70 @@ export default function CommandCenter() {
       setTimeout(() => addLog('TELEMETRY', 'Motion: 0.2g (near-stillness post impact)'), 500)
       setTimeout(() => addLog('TELEMETRY', 'Temp gradient: +2.1°C from baseline'), 650)
       setTimeout(() => addLog('TELEMETRY', 'Confidence: 87% (rule + statistical core)'), 800)
-      setTimeout(() => addLog('LOCATION', 'GPS position received: 22.5726°N 88.3639°E (queried at escalation)'), 1000)
+      setTimeout(() => addLog('LOCATION', coords), 1000)
       setTimeout(() => addLog('ALERT', 'Severity classified: CRITICAL — impact + physiological deterioration pattern'), 1200)
     }, 800)
   }
 
+  // Complete medic dispatch, stabilize soldier, and return cleanly to soldier monitoring
+  const completeDispatchNow = useCallback(() => {
+    const coords = getCoordsFormatted()
+    addLog('RESPONSE', `MED-01 arrived at ${coords} — patient stabilized`)
+    addLog('SYSTEM', 'Medic response complete. Incident resolved — returning to soldier monitoring.')
+    resolveMedicDispatch(soldierProfile?.id || 'soldier_01')
+    clearAlert(soldierProfile?.id || 'soldier_01')
+    setLiveVitals(prev => (prev ? {
+      ...prev,
+      status: 'NORMAL',
+      severity: 'NORMAL',
+      reasons: [],
+      what_went_wrong: null,
+      diagnosis: null
+    } : prev))
+    setSimDisabled(false)
+    setPhase(MONITORING)
+  }, [addLog, soldierProfile?.id, getCoordsFormatted])
+
   // Dispatch confirm
   function confirmDispatch() {
     setPhase(ENROUTE)
+    setDispatchProgress(0)
     setEnrouteAnim(false)
     setTimeout(() => setEnrouteAnim(true), 50)
-    addLog('RESPONSE', 'Medic dispatch authorized')
-    setTimeout(() => addLog('RESPONSE', 'MED-01 assigned — field medic unit'), 400)
-    setTimeout(() => addLog('RESPONSE', 'Unit status: EN ROUTE to 22.5726°N 88.3639°E'), 800)
+    addLog('RESPONSE', 'Medic dispatch authorized — MED-01 assigned')
+    const coords = getCoordsFormatted()
+    setTimeout(() => addLog('RESPONSE', `Unit status: EN ROUTE to ${coords}`), 400)
   }
+
+  // Automatically advance ENROUTE dispatch progress to 100% and return to monitoring
+  useEffect(() => {
+    if (phase !== ENROUTE) return
+
+    let cancelled = false
+    const totalMs = 4500
+    const start = Date.now()
+
+    const iv = setInterval(() => {
+      const elapsed = Date.now() - start
+      const p = Math.min(100, Math.round((elapsed / totalMs) * 100))
+      setDispatchProgress(p)
+      if (p >= 100) {
+        clearInterval(iv)
+        if (!cancelled) {
+          setTimeout(() => {
+            if (!cancelled) {
+              completeDispatchNow()
+            }
+          }, 600)
+        }
+      }
+    }, 40)
+
+    return () => {
+      cancelled = true
+      clearInterval(iv)
+    }
+  }, [phase, completeDispatchNow])
 
   function resetDemo() {
     setPhase(OFFLINE)
@@ -120,6 +269,7 @@ export default function CommandCenter() {
     setCommsAvail(true)
     setSimDisabled(false)
     setEnrouteAnim(false)
+    setDispatchProgress(0)
     setResetKey(k => k + 1)
   }
 
@@ -138,6 +288,20 @@ export default function CommandCenter() {
         <div className="cc-header-right">
           {isOnline && (
             <div className="cc-controls">
+              <button
+                className="btn-sim"
+                style={{ marginRight: 8, background: 'rgba(241, 196, 15, 0.15)', borderColor: '#f1c40f', color: '#f1c40f' }}
+                onClick={() => { setPersonnelInput(soldierProfile); setShowPersonnelModal(true) }}
+              >
+                🪖 ARMY PERSONNEL DATA
+              </button>
+              <button
+                className="btn-sim"
+                style={{ marginRight: 8, background: 'rgba(52, 152, 219, 0.15)', borderColor: '#3498db', color: '#3498db' }}
+                onClick={() => setShowFbModal(true)}
+              >
+                🔗 FIREBASE CONFIG
+              </button>
               <button
                 className="btn-sim"
                 disabled={simDisabled}
@@ -160,6 +324,20 @@ export default function CommandCenter() {
                   {commsAvail ? 'AVAILABLE' : 'JAMMED'}
                 </span>
               </div>
+            </div>
+          )}
+          {!isOnline && (
+            <button
+              className="btn-sim"
+              style={{ marginRight: 8, background: 'rgba(52, 152, 219, 0.15)', borderColor: '#3498db', color: '#3498db' }}
+              onClick={() => setShowFbModal(true)}
+            >
+              🔗 FIREBASE CONFIG
+            </button>
+          )}
+          {firebaseActive && (
+            <div className="cc-status-badge online" style={{ marginRight: 8, background: 'rgba(46, 204, 113, 0.15)', borderColor: '#2ecc71', color: '#2ecc71' }}>
+              FIREBASE LIVE
             </div>
           )}
           <div className={`cc-status-badge ${isOnline ? 'online' : 'offline'}`}>
@@ -235,16 +413,33 @@ export default function CommandCenter() {
                         <div className="crit-dot" />
                         <div className="crit-status">● PATIENT STATUS: CRITICAL</div>
                       </div>
-                      <div className="vital-row"><span className="vital-lbl">HEART RATE</span><span className="vital-val warn">150 <small style={{ fontSize: 11, fontWeight: 400 }}>BPM</small></span></div>
-                      <div className="vital-row"><span className="vital-lbl">SpO₂</span><span className="vital-val warn">85 <small style={{ fontSize: 11, fontWeight: 400 }}>%</small></span></div>
-                      <div className="vital-row"><span className="vital-lbl">HRV (RMSSD)</span><span className="vital-val warn">18 <small style={{ fontSize: 11, fontWeight: 400 }}>ms</small></span></div>
-                      <div className="vital-row"><span className="vital-lbl">MOTION</span><span className="vital-val amber">0.2 <small style={{ fontSize: 11, fontWeight: 400 }}>g (stillness)</small></span></div>
-                      <div className="vital-row"><span className="vital-lbl">TEMP GRADIENT</span><span className="vital-val amber">+2.1 <small style={{ fontSize: 11, fontWeight: 400 }}>°C</small></span></div>
-                      <div className="vital-row" style={{ marginBottom: 4 }}><span className="vital-lbl">CONFIDENCE</span><span className="vital-val amber">87 <small style={{ fontSize: 11, fontWeight: 400 }}>%</small></span></div>
+
+                      {/* Unique Soldier Code & What Went Wrong Banner */}
+                      <div className="crit-soldier-box" style={{ margin: '8px 0 12px 0', padding: '10px 12px', background: 'rgba(192, 57, 43, 0.25)', border: '1px solid rgba(231, 76, 60, 0.5)', borderRadius: 6 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: '#ff8a80', textTransform: 'uppercase', letterSpacing: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span>🪖 SOLDIER UNIQUE CODE: <strong style={{ color: '#fff', fontSize: 13 }}>{soldierProfile?.code || liveVitals?.soldier_code || 'SQD-ALPHA-01'}</strong></span>
+                          <span style={{ color: '#f1c40f', fontSize: 11 }}>BLOOD GROUP: {soldierProfile?.bloodGroup || 'O+'}</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>
+                          UNIT: <strong>{soldierProfile?.unit || '1st Parachute Regiment'}</strong>
+                        </div>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: '#ff6b6b', marginTop: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                          🚨 WHAT WENT WRONG (DIAGNOSIS):
+                        </div>
+                        <div style={{ fontSize: 13, color: '#ffffff', fontWeight: 600, marginTop: 2 }}>
+                          {liveVitals?.what_went_wrong || liveVitals?.diagnosis || (liveVitals?.reasons?.length ? liveVitals.reasons.join(' + ') : 'Low Oxygen Hypoxia & Physiological Deterioration')}
+                        </div>
+                      </div>
+
+                      <div className="vital-row"><span className="vital-lbl">HEART RATE</span><span className="vital-val warn">{liveVitals?.heart_rate_bpm ?? liveVitals?.heart_rate ?? '—'} <small style={{ fontSize: 11, fontWeight: 400 }}>BPM</small></span></div>
+                      <div className="vital-row"><span className="vital-lbl">SpO₂</span><span className="vital-val warn">{liveVitals?.spo2 != null ? `${liveVitals.spo2}` : '—'} <small style={{ fontSize: 11, fontWeight: 400 }}>%</small></span></div>
+                      <div className="vital-row"><span className="vital-lbl">TEMPERATURE</span><span className="vital-val" style={{ color: '#4caf50' }}>{liveVitals?.temperature_c != null ? Number(liveVitals.temperature_c).toFixed(1) : (liveVitals?.temperature != null ? Number(liveVitals.temperature).toFixed(1) : '—')} <small style={{ fontSize: 11, fontWeight: 400 }}>°C</small></span></div>
+                      <div className="vital-row"><span className="vital-lbl">TEMP GRADIENT</span><span className="vital-val amber">{liveVitals?.temp_gradient != null ? `${liveVitals.temp_gradient >= 0 ? '+' : ''}${Number(liveVitals.temp_gradient).toFixed(1)}` : '0.0'} <small style={{ fontSize: 11, fontWeight: 400 }}>°C</small></span></div>
+                      <div className="vital-row"><span className="vital-lbl">HRV (RMSSD)</span><span className="vital-val warn">{liveVitals?.hrv_rmssd ?? '—'} <small style={{ fontSize: 11, fontWeight: 400 }}>ms</small></span></div>
+                      <div className="vital-row"><span className="vital-lbl">MOTION</span><span className="vital-val amber">{liveVitals?.motion_mps2 != null ? `${Number(liveVitals.motion_mps2).toFixed(2)} m/s²` : (liveVitals?.motion_g != null ? `${(Number(liveVitals.motion_g) * 9.81).toFixed(2)} m/s²` : '—')}</span></div>
+                      <div className="vital-row" style={{ marginBottom: 4 }}><span className="vital-lbl">CONFIDENCE</span><span className="vital-val amber">{liveVitals?.confidence ? Math.round(liveVitals.confidence * (liveVitals.confidence <= 1 ? 100 : 1)) : 87} <small style={{ fontSize: 11, fontWeight: 400 }}>%</small></span></div>
                       <div className="loc-box">
-                        <div className="loc-lbl">LAST KNOWN POSITION</div>
-                        <div className="loc-coords">22.5726° N, 88.3639° E</div>
-                        <div className="loc-note">GPS queried only at the moment of CRITICAL escalation — never continuously tracked</div>
+                        <div className="loc-coords">{liveVitals?.latitude && liveVitals?.longitude ? `${Number(liveVitals.latitude).toFixed(4)}° N, ${Number(liveVitals.longitude).toFixed(4)}° E` : '13.1337° N, 77.5682° E'}</div>
                       </div>
                       <div className="data-callout">
                         📋 <strong>DATA RECEIVED: 7 fields only</strong> (timestamp, severity, HR, SpO₂, HRV, confidence, GPS location). Raw sensor stream was <em>never</em> transmitted. Classification happened on-device.
@@ -271,16 +466,29 @@ export default function CommandCenter() {
                         <div className="enroute-row"><span className="enroute-rl">INCIDENT STATUS</span><span className="enroute-rv" style={{ color: '#ff6b6b' }}>CRITICAL</span></div>
                         <div className="enroute-row"><span className="enroute-rl">CLASSIFICATION</span><span className="enroute-rv">Impact + deterioration</span></div>
                         <div className="enroute-row"><span className="enroute-rl">RESPONSE UNIT</span><span className="enroute-rv">MED-01</span></div>
-                        <div className="enroute-row"><span className="enroute-rl">DESTINATION</span><span className="enroute-rv">22.5726° N, 88.3639° E</span></div>
-                        <div className="enroute-row"><span className="enroute-rl">HR / SpO₂ / HRV</span><span className="enroute-rv">150 BPM · 85% · 18ms</span></div>
+                        <div className="enroute-row"><span className="enroute-rl">DESTINATION</span><span className="enroute-rv">{liveVitals?.latitude && liveVitals?.longitude ? `${Number(liveVitals.latitude).toFixed(4)}° N, ${Number(liveVitals.longitude).toFixed(4)}° E` : '13.1337° N, 77.5682° E'}</span></div>
+                        <div className="enroute-row"><span className="enroute-rl">HR / SpO₂ / HRV</span><span className="enroute-rv">{liveVitals?.heart_rate_bpm ?? liveVitals?.heart_rate ?? '—'} BPM · {liveVitals?.spo2 ?? '—'}% · {liveVitals?.hrv_rmssd ?? '—'}ms</span></div>
                       </div>
-                      <div className="enroute-bar-lbl">EN ROUTE</div>
+                      <div className="enroute-bar-lbl">EN ROUTE · {dispatchProgress}%</div>
                       <div className="enroute-bar-track">
                         <div
                           className="enroute-bar-fill"
-                          style={enrouteAnim ? { animation: 'enroute 8s linear forwards' } : { width: 0 }}
+                          style={{ width: `${dispatchProgress}%`, transition: 'width 0.1s linear' }}
                         />
                       </div>
+                      {dispatchProgress >= 100 ? (
+                        <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(46, 204, 113, 0.2)', border: '1px solid #2ecc71', borderRadius: 4, color: '#2ecc71', fontSize: 12, fontWeight: 700, textAlign: 'center' }}>
+                          ✓ MEDIC ARRIVED · PATIENT STABILIZED · RETURNING TO MONITORING...
+                        </div>
+                      ) : (
+                        <button
+                          className="btn-dispatch"
+                          style={{ marginTop: 14, width: '100%', background: 'rgba(46, 204, 113, 0.15)', borderColor: '#2ecc71', color: '#2ecc71', fontSize: 11, cursor: 'pointer' }}
+                          onClick={completeDispatchNow}
+                        >
+                          COMPLETE DISPATCH &amp; RETURN TO MONITORING
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -289,7 +497,7 @@ export default function CommandCenter() {
               {/* Telemetry */}
               <div className="panel-box">
                 <div className="panel-header"><div className="panel-title">HQ TELEMETRY FEED</div></div>
-                {(phase === MONITORING || phase === INCOMING) && (
+                {(phase === MONITORING || phase === INCOMING) && !liveVitals && (
                   <div className="no-tx-msg">
                     <div className="no-tx-label">NO ACTIVE TRANSMISSION — MONITORING...</div>
                     <div className="no-tx-sub">EdgeVital on-device classification running. Burst transmission only on CRITICAL escalation.</div>
@@ -303,40 +511,62 @@ export default function CommandCenter() {
                     </div>
                   </div>
                 )}
-                {(phase === DISPATCH || phase === MODAL || phase === ENROUTE) && (
-                  <div className="telem-grid">
-                    <div className="telem-card" style={{ background: 'rgba(192,57,43,0.1)', border: '1px solid rgba(192,57,43,0.25)' }}>
-                      <div className="telem-card-lbl">STATUS</div>
-                      <div className="telem-card-val" style={{ fontSize: 16, color: '#ff6b6b', letterSpacing: 1 }}>CRITICAL</div>
+                {(phase === DISPATCH || phase === MODAL || phase === ENROUTE || liveVitals !== null) && (
+                  <div>
+                    <div className="telem-grid">
+                      <div className="telem-card" style={{ background: liveVitals?.status === 'CRITICAL' ? 'rgba(192,57,43,0.1)' : 'rgba(46,204,113,0.1)', border: liveVitals?.status === 'CRITICAL' ? '1px solid rgba(192,57,43,0.25)' : '1px solid rgba(46,204,113,0.25)' }}>
+                        <div className="telem-card-lbl">STATUS</div>
+                        <div className="telem-card-val" style={{ fontSize: 16, color: liveVitals?.status === 'CRITICAL' ? '#ff6b6b' : '#2ecc71', letterSpacing: 1 }}>{liveVitals?.status || 'NORMAL'}</div>
+                      </div>
+                      <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
+                        <div className="telem-card-lbl">SOLDIER UNIQUE CODE</div>
+                        <div className="telem-card-val" style={{ color: '#ffcc02', fontSize: 13 }}>{liveVitals?.soldier_code || 'SQD-ALPHA-01'}</div>
+                      </div>
+                      <div className="telem-card" style={{ background: 'rgba(52, 152, 219, 0.08)', border: '1px solid rgba(52, 152, 219, 0.25)' }}>
+                        <div className="telem-card-lbl">COORDINATES</div>
+                        <div className="telem-card-val" style={{ fontSize: 11, color: '#3498db' }}>
+                          {liveVitals?.latitude && liveVitals?.longitude ? `${Number(liveVitals.latitude).toFixed(4)}° N, ${Number(liveVitals.longitude).toFixed(4)}° E` : '13.1337° N, 77.5682° E'}
+                        </div>
+                      </div>
+                      <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
+                        <div className="telem-card-lbl">HEART RATE</div>
+                        <div className="telem-card-val" style={{ color: liveVitals?.status === 'CRITICAL' ? '#ff6b6b' : '#4caf50' }}>{liveVitals?.heart_rate_bpm ?? liveVitals?.heart_rate ?? '—'} <span style={{ fontSize: 11, fontWeight: 400 }}>BPM</span></div>
+                      </div>
+                      <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
+                        <div className="telem-card-lbl">SpO₂</div>
+                        <div className="telem-card-val" style={{ color: liveVitals?.spo2 != null && liveVitals.spo2 < 90 ? '#ff6b6b' : '#4caf50' }}>{liveVitals?.spo2 != null ? `${liveVitals.spo2}%` : '—'}</div>
+                      </div>
+                      <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
+                        <div className="telem-card-lbl">MOTION (ACCEL)</div>
+                        <div className="telem-card-val" style={{ color: '#ff9800' }}>{liveVitals?.motion_mps2 != null ? `${Number(liveVitals.motion_mps2).toFixed(2)} m/s²` : (liveVitals?.motion_g != null ? `${(Number(liveVitals.motion_g) * 9.81).toFixed(2)} m/s²` : '—')}</div>
+                      </div>
+                      <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
+                        <div className="telem-card-lbl">TEMPERATURE</div>
+                        <div className="telem-card-val" style={{ color: '#4caf50' }}>{liveVitals?.temperature_c != null ? `${Number(liveVitals.temperature_c).toFixed(1)}°C` : (liveVitals?.temperature != null ? `${Number(liveVitals.temperature).toFixed(1)}°C` : '—')}</div>
+                      </div>
+                      <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
+                        <div className="telem-card-lbl">TEMP DELTA</div>
+                        <div className="telem-card-val" style={{ color: '#ff9800' }}>{liveVitals?.temp_gradient != null ? `${liveVitals.temp_gradient >= 0 ? '+' : ''}${Number(liveVitals.temp_gradient).toFixed(1)}°C` : '—'}</div>
+                      </div>
+                      <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
+                        <div className="telem-card-lbl">PATTERN</div>
+                        <div className="telem-card-val" style={{ fontSize: 11, color: '#CADCFC' }}>{liveVitals?.reasons?.length ? liveVitals.reasons.join(' + ') : (liveVitals?.status || 'Active Monitoring')}</div>
+                      </div>
                     </div>
-                    <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
-                      <div className="telem-card-lbl">CONFIDENCE</div>
-                      <div className="telem-card-val" style={{ color: '#ffcc02' }}>87%</div>
-                    </div>
-                    <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
-                      <div className="telem-card-lbl">HEART RATE</div>
-                      <div className="telem-card-val" style={{ color: '#ff6b6b' }}>150 <span style={{ fontSize: 11, fontWeight: 400 }}>BPM</span></div>
-                    </div>
-                    <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
-                      <div className="telem-card-lbl">SpO₂</div>
-                      <div className="telem-card-val" style={{ color: '#ff6b6b' }}>85 <span style={{ fontSize: 11, fontWeight: 400 }}>%</span></div>
-                    </div>
-                    <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
-                      <div className="telem-card-lbl">HRV (RMSSD)</div>
-                      <div className="telem-card-val" style={{ color: '#ff9800' }}>18 <span style={{ fontSize: 11, fontWeight: 400 }}>ms</span></div>
-                    </div>
-                    <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
-                      <div className="telem-card-lbl">MOTION</div>
-                      <div className="telem-card-val" style={{ color: '#ff9800' }}>0.2g</div>
-                    </div>
-                    <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
-                      <div className="telem-card-lbl">TEMP DELTA</div>
-                      <div className="telem-card-val" style={{ color: '#ff9800' }}>+2.1°C</div>
-                    </div>
-                    <div className="telem-card" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(202,220,252,0.08)' }}>
-                      <div className="telem-card-lbl">PATTERN</div>
-                      <div className="telem-card-val" style={{ fontSize: 11, color: '#CADCFC' }}>Impact + Stillness</div>
-                    </div>
+
+                    {liveVitals?.status === 'CRITICAL' && (
+                      <div style={{ marginTop: 12, padding: 12, background: 'rgba(192, 57, 43, 0.2)', border: '1px solid rgba(231, 76, 60, 0.4)', borderRadius: 6 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: '#ff6b6b', textTransform: 'uppercase', letterSpacing: 1 }}>
+                          🚨 CRITICAL DIAGNOSIS (WHAT WENT WRONG):
+                        </div>
+                        <div style={{ fontSize: 13, color: '#ffffff', fontWeight: 600, marginTop: 4 }}>
+                          {liveVitals?.what_went_wrong || liveVitals?.diagnosis || 'Low Oxygen Hypoxia & Physiological Deterioration'}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'rgba(202,220,252,0.8)', marginTop: 4 }}>
+                          SOLDIER: <strong>{liveVitals?.soldier_code || 'SQD-ALPHA-01'}</strong> | <strong>{liveVitals?.latitude && liveVitals?.longitude ? `${Number(liveVitals.latitude).toFixed(4)}° N, ${Number(liveVitals.longitude).toFixed(4)}° E` : '13.1337° N, 77.5682° E'}</strong>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -362,7 +592,7 @@ export default function CommandCenter() {
             {/* Reset */}
             {phase === ENROUTE && (
               <div className="reset-wrap">
-                <button className="btn-reset" onClick={resetDemo}>RESET DEMO</button>
+                <button className="btn-reset" onClick={completeDispatchNow}>COMPLETE &amp; RETURN TO MONITORING</button>
               </div>
             )}
           </div>
@@ -373,21 +603,123 @@ export default function CommandCenter() {
       <div className={`modal-overlay ${phase === MODAL ? 'active' : ''}`}>
         <div className="modal-box">
           <h3>CONFIRM MEDICAL DISPATCH</h3>
-          <div className="modal-sub">Review incident details before authorizing response</div>
+          <div className="modal-sub">Review incident &amp; soldier details before authorizing response</div>
           <div className="modal-rows">
-            <div className="modal-row"><span className="modal-rl">SEVERITY</span><span className="modal-rv red">CRITICAL</span></div>
-            <div className="modal-row"><span className="modal-rl">CLASSIFICATION</span><span className="modal-rv">Impact + deterioration</span></div>
-            <div className="modal-row"><span className="modal-rl">HEART RATE</span><span className="modal-rv">150 BPM</span></div>
-            <div className="modal-row"><span className="modal-rl">SpO₂</span><span className="modal-rv">85%</span></div>
-            <div className="modal-row"><span className="modal-rl">HRV (RMSSD)</span><span className="modal-rv">18ms</span></div>
-            <div className="modal-row"><span className="modal-rl">MOTION</span><span className="modal-rv">0.2g (near-stillness)</span></div>
-            <div className="modal-row"><span className="modal-rl">LOCATION</span><span className="modal-rv">22.5726°N 88.3639°E</span></div>
-            <div className="modal-row"><span className="modal-rl">CONFIDENCE</span><span className="modal-rv">87%</span></div>
+            <div className="modal-row"><span className="modal-rl">SOLDIER UNIQUE CODE</span><span className="modal-rv yellow" style={{ color: '#ffcc02', fontWeight: 'bold' }}>{soldierProfile?.code || 'SQD-ALPHA-01'}</span></div>
+
+            <div className="modal-row"><span className="modal-rl">MILITARY UNIT</span><span className="modal-rv">{soldierProfile?.unit || '1st Parachute Regiment'}</span></div>
+            <div className="modal-row"><span className="modal-rl">BLOOD GROUP</span><span className="modal-rv amber" style={{ color: '#f1c40f' }}>{soldierProfile?.bloodGroup || 'O+'}</span></div>
+            <div className="modal-row"><span className="modal-rl">SEVERITY</span><span className="modal-rv red">{liveVitals?.status || 'CRITICAL'}</span></div>
+            <div className="modal-row"><span className="modal-rl">WHAT WENT WRONG</span><span className="modal-rv red" style={{ color: '#ff6b6b' }}>{liveVitals?.what_went_wrong || liveVitals?.diagnosis || 'Low Oxygen Hypoxia + Impact Shock'}</span></div>
+            <div className="modal-row"><span className="modal-rl">COORDINATES</span><span className="modal-rv" style={{ color: '#3498db' }}>{liveVitals?.latitude && liveVitals?.longitude ? `${Number(liveVitals.latitude).toFixed(4)}° N, ${Number(liveVitals.longitude).toFixed(4)}° E` : '13.1337° N, 77.5682° E'}</span></div>
+            <div className="modal-row"><span className="modal-rl">HEART RATE / SpO₂</span><span className="modal-rv">{liveVitals?.heart_rate_bpm ?? liveVitals?.heart_rate ?? '—'} BPM · {liveVitals?.spo2 != null ? `${liveVitals.spo2}%` : '—'}</span></div>
             <div className="modal-row"><span className="modal-rl">RESPONSE UNIT</span><span className="modal-rv">MED-01</span></div>
           </div>
           <div className="modal-actions">
             <button className="btn-cancel" onClick={() => setPhase(DISPATCH)}>CANCEL</button>
             <button className="btn-confirm" onClick={confirmDispatch}>CONFIRM DISPATCH</button>
+          </div>
+        </div>
+      </div>
+
+      {/* ARMY PERSONNEL DATA MODAL */}
+      <div className={`modal-overlay ${showPersonnelModal ? 'active' : ''}`}>
+        <div className="modal-box" style={{ maxWidth: 520 }}>
+          <h3>🪖 ARMY PERSONNEL REGISTRY &amp; UNIQUE CODE</h3>
+          <div className="modal-sub">Manage military personnel profile and unique identifier code</div>
+          <div style={{ margin: '16px 0', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div>
+              <label style={{ display: 'block', fontSize: 11, color: '#CADCFC', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
+                Soldier Unique Code (Identifier):
+              </label>
+              <input
+                type="text"
+                value={personnelInput.code}
+                onChange={e => setPersonnelInput({ ...personnelInput, code: e.target.value })}
+                placeholder="e.g. SQD-ALPHA-01"
+                style={{ width: '100%', padding: '9px 12px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(241, 196, 15, 0.4)', borderRadius: 6, color: '#f1c40f', fontSize: 14, fontFamily: 'monospace', fontWeight: 'bold' }}
+              />
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 11, color: '#CADCFC', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
+                  Military Unit / Battalion:
+                </label>
+                <input
+                  type="text"
+                  value={personnelInput.unit}
+                  onChange={e => setPersonnelInput({ ...personnelInput, unit: e.target.value })}
+                  placeholder="e.g. 1st Parachute Regiment"
+                  style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(202,220,252,0.2)', borderRadius: 6, color: '#fff', fontSize: 13 }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 11, color: '#CADCFC', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
+                  Blood Group:
+                </label>
+                <input
+                  type="text"
+                  value={personnelInput.bloodGroup}
+                  onChange={e => setPersonnelInput({ ...personnelInput, bloodGroup: e.target.value })}
+                  placeholder="e.g. O+"
+                  style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(202,220,252,0.2)', borderRadius: 6, color: '#fff', fontSize: 13 }}
+                />
+              </div>
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: 11, color: '#CADCFC', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
+                Emergency Contact:
+              </label>
+              <input
+                type="text"
+                value={personnelInput.contact}
+                onChange={e => setPersonnelInput({ ...personnelInput, contact: e.target.value })}
+                placeholder="e.g. +91 98765 43210"
+                style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(202,220,252,0.2)', borderRadius: 6, color: '#fff', fontSize: 13 }}
+              />
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button className="btn-cancel" onClick={() => setShowPersonnelModal(false)}>CANCEL</button>
+            <button className="btn-confirm" style={{ background: '#f1c40f', color: '#000' }} onClick={savePersonnelProfile}>SAVE PERSONNEL PROFILE</button>
+          </div>
+        </div>
+      </div>
+
+      {/* FIREBASE CONFIG MODAL */}
+      <div className={`modal-overlay ${showFbModal ? 'active' : ''}`}>
+        <div className="modal-box" style={{ maxWidth: 520 }}>
+          <h3>🔗 FIREBASE DATABASE CONFIGURATION</h3>
+          <div className="modal-sub">Connect your web app to your Raspberry Pi 4 Firebase Realtime Database</div>
+          <div style={{ margin: '16px 0' }}>
+            <label style={{ display: 'block', fontSize: 11, color: '#CADCFC', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
+              Firebase Realtime Database URL:
+            </label>
+            <input
+              type="text"
+              value={fbInputUrl}
+              onChange={e => setFbInputUrl(e.target.value)}
+              placeholder="https://your-project-default-rtdb.firebaseio.com"
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(202,220,252,0.2)',
+                borderRadius: 6,
+                color: '#fff',
+                fontSize: 13,
+                fontFamily: 'monospace',
+                outline: 'none'
+              }}
+            />
+            <div style={{ fontSize: 11, color: 'rgba(202,220,252,0.5)', marginTop: 8, lineHeight: 1.4 }}>
+              Enter the Realtime Database URL where your Raspberry Pi (<code>rpi_firebase_monitor.py</code>) is pushing sensor data.
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button className="btn-cancel" onClick={() => setShowFbModal(false)}>CANCEL</button>
+            <button className="btn-confirm" style={{ background: '#3498db' }} onClick={saveFbUrl}>SAVE &amp; CONNECT</button>
           </div>
         </div>
       </div>
