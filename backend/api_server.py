@@ -100,6 +100,15 @@ def sensor_loop():
 
 # === API ENDPOINTS ===
 
+@app.route("/", methods=["GET"])
+def index():
+    """Root health check confirmation."""
+    return jsonify({
+        "status": "online",
+        "system": "EdgeVital Telemetry Server",
+        "endpoints": ["/api/status", "/api/history", "/api/alert", "/api/login"]
+    })
+
 @app.route("/api/login", methods=["POST"])
 def admin_login():
     """Authenticate Admin or Medic operators."""
