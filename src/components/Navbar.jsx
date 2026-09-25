@@ -1,6 +1,8 @@
 import { Link } from 'react-router-dom'
 
 export default function Navbar({ dark, setDark }) {
+  const token = localStorage.getItem('edgevital-auth-token')
+
   return (
     <nav className="nav">
       <Link to="/" className="nav-logo">EDGE<span>&middot;</span>VITAL</Link>
@@ -13,6 +15,16 @@ export default function Navbar({ dark, setDark }) {
         <li><a href="/#demo">Live Demo</a></li>
       </ul>
       <div className="nav-right">
+        {token ? (
+          <Link to="/command-center" className="nav-admin-btn nav-admin-active">
+            <span className="live-dot-green"></span>
+            Command Center
+          </Link>
+        ) : (
+          <Link to="/login" className="nav-admin-btn">
+            <span>🔒</span> Admin Login
+          </Link>
+        )}
         <span className="nav-tag">NIRMAAN 2026</span>
         <button
           className="theme-toggle"

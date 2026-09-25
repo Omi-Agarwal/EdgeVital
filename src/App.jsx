@@ -1,7 +1,19 @@
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import LandingPage from './pages/LandingPage'
 import CommandCenterPage from './pages/CommandCenterPage'
+import LoginPage from './pages/LoginPage'
+
+function ProtectedRoute({ children }) {
+  const token = localStorage.getItem('edgevital-auth-token')
+  const location = useLocation()
+
+  if (!token) {
+    return <Navigate to="/login" state={{ from: location }} replace />
+  }
+
+  return children
+}
 
 export default function App() {
   const [dark, setDark] = useState(() => {
@@ -18,7 +30,16 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<LandingPage dark={dark} setDark={setDark} />} />
-      <Route path="/command-center" element={<CommandCenterPage dark={dark} setDark={setDark} />} />
+      <Route path="/login" element={<LoginPage dark={dark} setDark={setDark} />} />
+      <Route
+        path="/command-center"
+        element={
+          <ProtectedRoute>
+            <CommandCenterPage dark={dark} setDark={setDark} />
+          </ProtectedRoute>
+        }
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
 }
