@@ -100,6 +100,34 @@ def sensor_loop():
 
 # === API ENDPOINTS ===
 
+@app.route("/api/login", methods=["POST"])
+def admin_login():
+    """Authenticate Admin or Medic operators."""
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+
+    valid_users = {
+        "admin": "edgevital2026",
+        "medic": "medic123",
+        "omi": "nirmaan2026",
+        "harshita": "nirmaan2026",
+        "vaibhav": "nirmaan2026",
+        "abhishek": "nirmaan2026",
+    }
+
+    if username.lower() in valid_users and valid_users[username.lower()] == password:
+        return jsonify({
+            "status": "success",
+            "username": username.upper(),
+            "role": "TACTICAL_MEDIC" if username.lower() == "medic" else "COMMAND_ADMIN",
+            "token": f"edgevital-token-{username.lower()}-{int(time.time())}",
+            "message": "Access Granted",
+        }), 200
+
+    return jsonify({"error": "Invalid Security Credentials. Access Denied."}), 401
+
+
 @app.route("/api/status", methods=["GET"])
 def get_status():
     """Get current system status and latest sensor reading."""
