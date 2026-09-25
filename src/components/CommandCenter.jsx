@@ -36,7 +36,7 @@ export default function CommandCenter() {
   
   // Hardware Link States
   const [sourceMode, setSourceMode]       = useState('LIVE') // 'LIVE' or 'SIM'
-  const [apiEndpoint, setApiEndpoint]     = useState(() => localStorage.getItem('edgevital-api-url') || '')
+  const [apiEndpoint, setApiEndpoint]     = useState(() => localStorage.getItem('edgevital-api-url') || 'http://172.19.71.32:5000')
   const [hwConnected, setHwConnected]     = useState(false)
   const [liveVitals, setLiveVitals]       = useState({
     hr: 72,
