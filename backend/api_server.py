@@ -11,8 +11,9 @@ For the hackathon demo, it serves the frontend dashboard.
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from hardware_reader import PiHardwareReader
 from edge_inference import (
-    EdgeInferenceEngine, SensorSimulator, PersonalBaseline,
+    EdgeInferenceEngine, PersonalBaseline,
     DataLogger, GPSModule, AlertPacket, State
 )
 from dataclasses import asdict
@@ -27,7 +28,7 @@ CORS(app)
 # Global state
 baseline = PersonalBaseline()
 engine = EdgeInferenceEngine(baseline)
-simulator = SensorSimulator(baseline)
+hardware = PiHardwareReader()
 logger = DataLogger()
 gps = GPSModule()
 
@@ -49,7 +50,7 @@ state_lock = threading.Lock()
 def sensor_loop():
     """Background thread: continuously reads sensors and classifies."""
     while True:
-        reading = simulator.read()
+        reading = hardware.read()
         state, confidence, classification = engine.classify(reading)
         logger.log_reading(reading, state, confidence, classification)
 
