@@ -1,16 +1,12 @@
 import { initializeApp, getApps, deleteApp } from 'firebase/app'
 import { getDatabase, ref, onValue, off, set } from 'firebase/database'
 
-const getSavedDbUrl = () => {
-  return localStorage.getItem('FIREBASE_DATABASE_URL') ||
-         import.meta.env.VITE_FIREBASE_DATABASE_URL ||
-         "https://topline-bell-default-rtdb.firebaseio.com"
-}
+export const FIREBASE_DATABASE_URL = "https://topline-bell-default-rtdb.firebaseio.com"
 
 let firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDemoKeyForEdgeVitalApp123456",
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "topline-bell.firebaseapp.com",
-  databaseURL: getSavedDbUrl(),
+  databaseURL: FIREBASE_DATABASE_URL,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "topline-bell",
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "topline-bell.appspot.com",
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "1234567890",
@@ -18,24 +14,10 @@ let firebaseConfig = {
 }
 
 let app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0]
-export let db = getDatabase(app)
-
-export function updateFirebaseUrl(newUrl) {
-  if (!newUrl) return
-  const formattedUrl = newUrl.trim().replace(/\/$/, '')
-  localStorage.setItem('FIREBASE_DATABASE_URL', formattedUrl)
-  
-  try {
-    firebaseConfig.databaseURL = formattedUrl
-    db = getDatabase(app, formattedUrl)
-    console.log('[Firebase] Realtime Database URL updated to:', formattedUrl)
-  } catch (err) {
-    console.warn('[Firebase] Re-initializing app for new URL:', err)
-  }
-}
+export let db = getDatabase(app, FIREBASE_DATABASE_URL)
 
 export function getCurrentFirebaseUrl() {
-  return getSavedDbUrl()
+  return FIREBASE_DATABASE_URL
 }
 
 /**

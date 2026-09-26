@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { subscribeToVitals, subscribeToAlerts, updateFirebaseUrl, getCurrentFirebaseUrl, clearAlert, resolveMedicDispatch } from '../firebase'
+import { subscribeToVitals, subscribeToAlerts, clearAlert, resolveMedicDispatch, FIREBASE_DATABASE_URL } from '../firebase'
 
 // States: 0=offline, 1=init, 2=monitoring, 3=jammed, 4=incoming, 5=dispatch, 6=modal, 7=enroute
 const OFFLINE = 0, INIT = 1, MONITORING = 2, JAMMED = 3, INCOMING = 4, DISPATCH = 5, MODAL = 6, ENROUTE = 7
@@ -37,8 +37,6 @@ export default function CommandCenter() {
   const [resetKey, setResetKey]   = useState(0)
   const [liveVitals, setLiveVitals] = useState(null)
   const [firebaseActive, setFirebaseActive] = useState(false)
-  const [showFbModal, setShowFbModal] = useState(false)
-  const [fbInputUrl, setFbInputUrl] = useState(getCurrentFirebaseUrl())
 
   // Army Personnel Profile Management
   const [soldierProfile, setSoldierProfile] = useState(() => {
@@ -54,13 +52,6 @@ export default function CommandCenter() {
   const [showPersonnelModal, setShowPersonnelModal] = useState(false)
   const [personnelInput, setPersonnelInput] = useState(soldierProfile)
 
-  const saveFbUrl = () => {
-    updateFirebaseUrl(fbInputUrl)
-    setShowFbModal(false)
-    addLog('SYSTEM', `Firebase URL updated: ${fbInputUrl}`)
-    setResetKey(k => k + 1)
-  }
-
   const savePersonnelProfile = () => {
     setSoldierProfile(personnelInput)
     localStorage.setItem('edgevital_soldier_profile', JSON.stringify(personnelInput))
@@ -68,8 +59,7 @@ export default function CommandCenter() {
     addLog('SYSTEM', `Army Personnel updated: ${personnelInput.code}`)
     // Sync soldier profile to Firebase
     try {
-      const dbUrl = getCurrentFirebaseUrl().replace(/\/$/, '')
-      fetch(`${dbUrl}/soldiers/${personnelInput.id}.json`, {
+      fetch(`${FIREBASE_DATABASE_URL}/soldiers/${personnelInput.id}.json`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(personnelInput)
@@ -297,13 +287,6 @@ export default function CommandCenter() {
               </button>
               <button
                 className="btn-sim"
-                style={{ marginRight: 8, background: 'rgba(52, 152, 219, 0.15)', borderColor: '#3498db', color: '#3498db' }}
-                onClick={() => setShowFbModal(true)}
-              >
-                🔗 FIREBASE CONFIG
-              </button>
-              <button
-                className="btn-sim"
                 disabled={simDisabled}
                 onClick={simulateCritical}
               >
@@ -325,15 +308,6 @@ export default function CommandCenter() {
                 </span>
               </div>
             </div>
-          )}
-          {!isOnline && (
-            <button
-              className="btn-sim"
-              style={{ marginRight: 8, background: 'rgba(52, 152, 219, 0.15)', borderColor: '#3498db', color: '#3498db' }}
-              onClick={() => setShowFbModal(true)}
-            >
-              🔗 FIREBASE CONFIG
-            </button>
           )}
           {firebaseActive && (
             <div className="cc-status-badge online" style={{ marginRight: 8, background: 'rgba(46, 204, 113, 0.15)', borderColor: '#2ecc71', color: '#2ecc71' }}>
@@ -683,43 +657,6 @@ export default function CommandCenter() {
           <div className="modal-actions">
             <button className="btn-cancel" onClick={() => setShowPersonnelModal(false)}>CANCEL</button>
             <button className="btn-confirm" style={{ background: '#f1c40f', color: '#000' }} onClick={savePersonnelProfile}>SAVE PERSONNEL PROFILE</button>
-          </div>
-        </div>
-      </div>
-
-      {/* FIREBASE CONFIG MODAL */}
-      <div className={`modal-overlay ${showFbModal ? 'active' : ''}`}>
-        <div className="modal-box" style={{ maxWidth: 520 }}>
-          <h3>🔗 FIREBASE DATABASE CONFIGURATION</h3>
-          <div className="modal-sub">Connect your web app to your Raspberry Pi 4 Firebase Realtime Database</div>
-          <div style={{ margin: '16px 0' }}>
-            <label style={{ display: 'block', fontSize: 11, color: '#CADCFC', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
-              Firebase Realtime Database URL:
-            </label>
-            <input
-              type="text"
-              value={fbInputUrl}
-              onChange={e => setFbInputUrl(e.target.value)}
-              placeholder="https://your-project-default-rtdb.firebaseio.com"
-              style={{
-                width: '100%',
-                padding: '10px 12px',
-                background: 'rgba(255,255,255,0.05)',
-                border: '1px solid rgba(202,220,252,0.2)',
-                borderRadius: 6,
-                color: '#fff',
-                fontSize: 13,
-                fontFamily: 'monospace',
-                outline: 'none'
-              }}
-            />
-            <div style={{ fontSize: 11, color: 'rgba(202,220,252,0.5)', marginTop: 8, lineHeight: 1.4 }}>
-              Enter the Realtime Database URL where your Raspberry Pi (<code>rpi_firebase_monitor.py</code>) is pushing sensor data.
-            </div>
-          </div>
-          <div className="modal-actions">
-            <button className="btn-cancel" onClick={() => setShowFbModal(false)}>CANCEL</button>
-            <button className="btn-confirm" style={{ background: '#3498db' }} onClick={saveFbUrl}>SAVE &amp; CONNECT</button>
           </div>
         </div>
       </div>
